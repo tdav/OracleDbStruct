@@ -5,13 +5,14 @@ internal class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        if (args.Length == 0)
-        {
-            Console.WriteLine("Usage: OracleDeps <ddl.sql> [--dot out.dot] [--json out.json]");
-            return 1;
-        }
+        //if (args.Length == 0)
+        //{
+        //    Console.WriteLine("Usage: OracleDeps <ddl.sql> [--dot out.dot] [--json out.json]");
+        //    return 1;
+        //}
 
-        var ddlPath = args[0];
+        //var ddlPath = args[0];
+        var ddlPath = @"c:\Works_Java\schema_all_asbt.txt";
         var ddl = await File.ReadAllTextAsync(ddlPath);
 
         var graph = OracleDependencyAnalyzer.Analyze(ddl);
@@ -49,8 +50,14 @@ internal class Program
             var json = JsonSerializer.Serialize(new
             {
                 tables = graph.Tables.OrderBy(_ => _).ToArray(),
-                edges = graph.Edges.Select(e => new { from = e.From.ToString(), to = e.ToTable, kind = e.Kind.ToString() })
+                edges = graph.Edges.Select(e => new
+                {
+                    from = e.From.ToString(),
+                    to = e.ToTable,
+                    kind = e.Kind.ToString()                    
+                })
             }, new JsonSerializerOptions { WriteIndented = true });
+
             await File.WriteAllTextAsync(jsonOut, json);
             Console.WriteLine($"JSON written: {jsonOut}");
         }
