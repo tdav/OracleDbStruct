@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
+		<PackageReference Include="Antlr4BuildTasks" Version="8.20" PrivateAssets="all" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Antlr4 Include="Grammar/OracleDdl.g4" Listener="false" Visitor="false" Package="OracleDbStruct.Antlr" />
+	</ItemGroup>
+</Project>
