@@ -1,8 +1,4 @@
-using System;
-using System.IO;
-using System.Reflection;
 using Antlr4.Runtime;
-using Antlr4.Runtime.Misc;
 
 public class PlSqlLexerBase : Lexer
 {

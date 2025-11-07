@@ -1,10 +1,5 @@
 ﻿using Antlr4.Runtime;
-using Antlr4.Runtime.Misc;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
-using static Antlr4.Runtime.Token;
 
 namespace OracleDeps;
 
@@ -21,7 +16,7 @@ public static class OracleDependencyAnalyzer
         // (Необязательно, но полезно: построить дерево для валидации)
         try
         {
-            var parser = new PlSqlParser(tokens) { BuildParseTrees = true };
+            var parser = new PlSqlParser(tokens);// {  BuildParseTrees = true };
             // Корневое правило грамматики
             parser.sql_script();
         }
@@ -32,7 +27,7 @@ public static class OracleDependencyAnalyzer
 
         // Соберём только «основные» токены (без комментариев/whitespace)
         var codeTokens = tokens.GetTokens()
-            .Where(t => t.Channel == DEFAULT_CHANNEL)
+            .Where(t => t.Channel == Antlr4.Runtime.TokenConstants.DefaultChannel)
             .Select(t => t.Text)
             .ToList();
 

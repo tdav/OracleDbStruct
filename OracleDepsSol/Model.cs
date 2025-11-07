@@ -1,6 +1,4 @@
-﻿using System.Collections.Generic;
-
-namespace OracleDeps;
+﻿namespace OracleDeps;
 
 public enum DbObjectKind { Table, View, Package, Procedure, Function, Trigger, Unknown }
 
