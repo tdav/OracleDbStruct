@@ -1,516 +1,254 @@
 ﻿using Antlr4.Runtime;
+using Antlr4.Runtime.Misc;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
-using OracleDbStruct.Antlr;
-using OracleDbStruct.Models;
 
-namespace OracleDbStruct.Services;
+namespace OracleDeps;
 
-public sealed class DdlDependencyAnalyzer
+public static class OracleDependencyAnalyzer
 {
-    private static readonly StringComparer NameComparer = StringComparer.OrdinalIgnoreCase;
-
-    public IReadOnlyCollection<DatabaseObject> Analyze(string ddlScript)
+    public static DepGraph Analyze(string ddl)
     {
-        if (string.IsNullOrWhiteSpace(ddlScript))
+        var input = CharStreams.FromString(ddl);
+        var upper = new CaseChangingCharStream(input, upper: true);
+        var lexer = new PlSqlLexer(upper);
+        var tokens = new CommonTokenStream(lexer);
+        tokens.Fill();
+
+        // (Необязательно, но полезно: построить дерево для валидации)
+        try
         {
-            return Array.Empty<DatabaseObject>();
+            var parser = new PlSqlParser(tokens) { BuildParseTrees = true };
+            // Корневое правило грамматики
+            parser.sql_script();
+        }
+        catch
+        {
+            // Продолжаем — аналитика по токенам всё равно даст пользу
         }
 
-        var inputStream = new AntlrInputStream(ddlScript);
-        var lexer = new OracleDdlLexer(inputStream);
-        var tokenStream = new CommonTokenStream(lexer);
-        tokenStream.Fill();
-        var allTokens = tokenStream.GetTokens()
-            .Where(t => t.Type != TokenConstants.EOF && t.Channel == TokenConstants.DefaultChannel)
+        // Соберём только «основные» токены (без комментариев/whitespace)
+        var codeTokens = tokens.GetTokens()
+            .Where(t => t.Channel == TokenConstants.DefaultChannel)
+            .Select(t => t.Text)
             .ToList();
 
-        var objects = new List<DatabaseObject>();
-        var index = 0;
-        while (index < allTokens.Count)
+        var g = new DepGraph();
+        var i = 0;
+
+        while (i < codeTokens.Count)
         {
-            var token = allTokens[index];
-            if (token.Type == OracleDdlLexer.CREATE)
+            string tk = codeTokens[i];
+
+            if (IsKeyword(tk, "CREATE"))
             {
-                var databaseObject = ParseCreateStatement(allTokens, ref index);
-                if (databaseObject is not null)
+                var j = i + 1;
+                if (Match(codeTokens, ref j, "OR", "REPLACE")) { /* optional */ }
+
+                DbObjectKind kind = DbObjectKind.Unknown;
+                if (Match(codeTokens, ref j, "TABLE")) kind = DbObjectKind.Table;
+                else if (Match(codeTokens, ref j, "VIEW")) kind = DbObjectKind.View;
+                else if (Match(codeTokens, ref j, "PACKAGE")) kind = DbObjectKind.Package;
+                else if (Match(codeTokens, ref j, "PROCEDURE")) kind = DbObjectKind.Procedure;
+                else if (Match(codeTokens, ref j, "FUNCTION")) kind = DbObjectKind.Function;
+                else if (Match(codeTokens, ref j, "TRIGGER")) kind = DbObjectKind.Trigger;
+
+                if (kind != DbObjectKind.Unknown)
                 {
-                    objects.Add(databaseObject);
-                }
-            }
-            else
-            {
-                index++;
-            }
-        }
+                    var name = ReadObjectName(codeTokens, ref j);
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        var obj = new DbObjectId(name, kind);
+                        g.Objects.Add(obj);
+                        if (kind == DbObjectKind.Table) g.Tables.Add(name);
 
-        return objects;
-    }
+                        // TABLE: собрать FK → REFERENCES
+                        if (kind == DbObjectKind.Table)
+                            ExtractFkRefs(codeTokens, j, obj, g);
 
-    private static DatabaseObject? ParseCreateStatement(IReadOnlyList<IToken> tokens, ref int index)
-    {
-        var statementTokens = new List<IToken>();
-        var parenDepth = 0;
-        var beginEndDepth = 0;
-        string? objectType = null;
-        string? objectName = null;
-        int bodyStartIndex = -1;
+                        // VIEW: разобрать SELECT … и изъять табличные идентификаторы после FROM/JOIN
+                        if (kind == DbObjectKind.View)
+                            ExtractQueryTables(codeTokens, j, obj, ref g, DepKind.ViewQuery);
 
-        for (var i = index; i < tokens.Count; i++)
-        {
-            var token = tokens[i];
-            statementTokens.Add(token);
-
-            if (token.Type == OracleDdlLexer.LPAREN)
-            {
-                parenDepth++;
-            }
-            else if (token.Type == OracleDdlLexer.RPAREN && parenDepth > 0)
-            {
-                parenDepth--;
-            }
-
-            if (objectType is null)
-            {
-                (objectType, objectName, bodyStartIndex) = ReadObjectHeader(statementTokens);
-            }
-
-            if (objectType is not null && token.Type == OracleDdlLexer.BEGIN)
-            {
-                beginEndDepth++;
-            }
-            else if (objectType is not null && token.Type == OracleDdlLexer.END && beginEndDepth > 0)
-            {
-                beginEndDepth--;
-            }
-
-            if (token.Type == OracleDdlLexer.SEMI)
-            {
-                if (objectType is null)
-                {
-                    index = i + 1;
-                    return null;
+                        // PLSQL объекты: DML-ссылки на таблицы
+                        if (kind is DbObjectKind.Package or DbObjectKind.Procedure or DbObjectKind.Function or DbObjectKind.Trigger)
+                            ExtractDmlTables(codeTokens, j, obj, g);
+                    }
                 }
 
-                var shouldStop = objectType switch
-                {
-                    "PACKAGE" => parenDepth == 0 && ContainsTokenType(statementTokens, OracleDdlLexer.END),
-                    "PACKAGE BODY" => parenDepth == 0 && beginEndDepth == 0,
-                    "PROCEDURE" => parenDepth == 0 && beginEndDepth == 0,
-                    "FUNCTION" => parenDepth == 0 && beginEndDepth == 0,
-                    "TRIGGER" => parenDepth == 0 && beginEndDepth == 0,
-                    _ => parenDepth == 0 && beginEndDepth == 0,
-                };
-
-                if (shouldStop)
-                {
-                    index = i + 1;
-                    return BuildDatabaseObject(objectType, objectName, statementTokens, bodyStartIndex);
-                }
-            }
-        }
-
-        index = tokens.Count;
-        if (objectType is null)
-        {
-            return null;
-        }
-
-        return BuildDatabaseObject(objectType, objectName, statementTokens, bodyStartIndex);
-    }
-
-    private static DatabaseObject? BuildDatabaseObject(string objectType, string? objectName, IReadOnlyList<IToken> statementTokens, int bodyStartIndex)
-    {
-        if (objectName is null)
-        {
-            return null;
-        }
-
-        var dependencies = objectType switch
-        {
-            "TABLE" => CollectTableDependencies(statementTokens, bodyStartIndex),
-            "VIEW" => CollectSelectDependencies(statementTokens, bodyStartIndex),
-            "MATERIALIZED VIEW" => CollectSelectDependencies(statementTokens, bodyStartIndex),
-            "PACKAGE" => CollectProgramUnitDependencies(statementTokens, bodyStartIndex),
-            "PACKAGE BODY" => CollectProgramUnitDependencies(statementTokens, bodyStartIndex),
-            "PROCEDURE" => CollectProgramUnitDependencies(statementTokens, bodyStartIndex),
-            "FUNCTION" => CollectProgramUnitDependencies(statementTokens, bodyStartIndex),
-            "TRIGGER" => CollectProgramUnitDependencies(statementTokens, bodyStartIndex),
-            _ => new HashSet<string>(NameComparer)
-        };
-
-        var orderedDependencies = dependencies.OrderBy(x => x, NameComparer).ToArray();
-        return new DatabaseObject(objectName, objectType, orderedDependencies);
-    }
-
-    private static HashSet<string> CollectTableDependencies(IReadOnlyList<IToken> tokens, int startIndex)
-    {
-        var dependencies = new HashSet<string>(NameComparer);
-        var asIndex = FindToken(tokens, OracleDdlLexer.AS, startIndex);
-        if (asIndex >= 0)
-        {
-            var selectDependencies = CollectTableReferences(tokens, asIndex + 1);
-            dependencies.UnionWith(selectDependencies);
-        }
-
-        for (var i = Math.Max(0, startIndex); i < tokens.Count; i++)
-        {
-            if (tokens[i].Type == OracleDdlLexer.REFERENCES)
-            {
-                var nextIndex = i + 1;
-                var referencedName = TryReadTableReference(tokens, ref nextIndex);
-                if (!string.IsNullOrEmpty(referencedName))
-                {
-                    dependencies.Add(referencedName);
-                }
-
-                i = nextIndex - 1;
-            }
-        }
-
-        return dependencies;
-    }
-
-    private static HashSet<string> CollectSelectDependencies(IReadOnlyList<IToken> tokens, int startIndex)
-    {
-        var selectStart = FindToken(tokens, OracleDdlLexer.SELECT, startIndex);
-        if (selectStart < 0)
-        {
-            return new HashSet<string>(NameComparer);
-        }
-
-        return CollectTableReferences(tokens, selectStart);
-    }
-
-    private static HashSet<string> CollectProgramUnitDependencies(IReadOnlyList<IToken> tokens, int startIndex)
-    {
-        var bodyIndex = FindBodyStart(tokens, startIndex);
-        return CollectTableReferences(tokens, bodyIndex);
-    }
-
-    private static int FindBodyStart(IReadOnlyList<IToken> tokens, int startIndex)
-    {
-        for (var i = Math.Max(0, startIndex); i < tokens.Count; i++)
-        {
-            if (tokens[i].Type == OracleDdlLexer.AS || tokens[i].Type == OracleDdlLexer.IS)
-            {
-                return i + 1;
-            }
-        }
-
-        return Math.Max(0, startIndex);
-    }
-
-    private static (string? ObjectType, string? ObjectName, int BodyStartIndex) ReadObjectHeader(IReadOnlyList<IToken> tokens)
-    {
-        if (tokens.Count == 0 || tokens[0].Type != OracleDdlLexer.CREATE)
-        {
-            return (null, null, -1);
-        }
-
-        var index = 1;
-        while (index < tokens.Count && (tokens[index].Type == OracleDdlLexer.OR || tokens[index].Type == OracleDdlLexer.REPLACE))
-        {
-            index++;
-        }
-
-        while (index < tokens.Count)
-        {
-            var token = tokens[index];
-            switch (token.Type)
-            {
-                case OracleDdlLexer.TABLE:
-                    {
-                        index++;
-                        var name = ReadQualifiedName(tokens, ref index);
-                        return ("TABLE", name, index);
-                    }
-                case OracleDdlLexer.MATERIALIZED:
-                    {
-                        index++;
-                        if (index < tokens.Count && tokens[index].Type == OracleDdlLexer.VIEW)
-                        {
-                            index++;
-                        }
-
-                        var name = ReadQualifiedName(tokens, ref index);
-                        return ("MATERIALIZED VIEW", name, index);
-                    }
-                case OracleDdlLexer.VIEW:
-                    {
-                        index++;
-                        var name = ReadQualifiedName(tokens, ref index);
-                        return ("VIEW", name, index);
-                    }
-                case OracleDdlLexer.PACKAGE:
-                    {
-                        index++;
-                        var type = "PACKAGE";
-                        if (index < tokens.Count && tokens[index].Type == OracleDdlLexer.BODY)
-                        {
-                            type = "PACKAGE BODY";
-                            index++;
-                        }
-
-                        var name = ReadQualifiedName(tokens, ref index);
-                        return (type, name, index);
-                    }
-                case OracleDdlLexer.FUNCTION:
-                    {
-                        index++;
-                        var name = ReadQualifiedName(tokens, ref index);
-                        return ("FUNCTION", name, index);
-                    }
-                case OracleDdlLexer.PROCEDURE:
-                    {
-                        index++;
-                        var name = ReadQualifiedName(tokens, ref index);
-                        return ("PROCEDURE", name, index);
-                    }
-                case OracleDdlLexer.TRIGGER:
-                    {
-                        index++;
-                        var name = ReadQualifiedName(tokens, ref index);
-                        return ("TRIGGER", name, index);
-                    }
-                default:
-                    index++;
-                    break;
-            }
-        }
-
-        return (null, null, -1);
-    }
-
-    private static HashSet<string> CollectTableReferences(IReadOnlyList<IToken> tokens, int startIndex)
-    {
-        var references = new HashSet<string>(NameComparer);
-        for (var i = Math.Max(0, startIndex); i < tokens.Count; i++)
-        {
-            var token = tokens[i];
-            switch (token.Type)
-            {
-                case OracleDdlLexer.FROM:
-                case OracleDdlLexer.JOIN:
-                case OracleDdlLexer.INTO:
-                case OracleDdlLexer.USING:
-                    {
-                        var nextIndex = i + 1;
-                        var tableName = TryReadTableReference(tokens, ref nextIndex);
-                        if (!string.IsNullOrEmpty(tableName))
-                        {
-                            references.Add(tableName);
-                        }
-
-                        i = nextIndex - 1;
-                        break;
-                    }
-                case OracleDdlLexer.UPDATE:
-                    {
-                        var nextIndex = i + 1;
-                        var tableName = TryReadTableReference(tokens, ref nextIndex);
-                        if (!string.IsNullOrEmpty(tableName))
-                        {
-                            references.Add(tableName);
-                        }
-
-                        i = nextIndex - 1;
-                        break;
-                    }
-                case OracleDdlLexer.DELETE:
-                    {
-                        var nextIndex = i + 1;
-                        if (nextIndex < tokens.Count && tokens[nextIndex].Type == OracleDdlLexer.FROM)
-                        {
-                            nextIndex++;
-                        }
-
-                        var tableName = TryReadTableReference(tokens, ref nextIndex);
-                        if (!string.IsNullOrEmpty(tableName))
-                        {
-                            references.Add(tableName);
-                        }
-
-                        i = nextIndex - 1;
-                        break;
-                    }
-                case OracleDdlLexer.MERGE:
-                    {
-                        var nextIndex = i + 1;
-                        while (nextIndex < tokens.Count && tokens[nextIndex].Type != OracleDdlLexer.SEMI)
-                        {
-                            if (tokens[nextIndex].Type == OracleDdlLexer.INTO || tokens[nextIndex].Type == OracleDdlLexer.USING)
-                            {
-                                var afterKeyword = nextIndex + 1;
-                                var tableName = TryReadTableReference(tokens, ref afterKeyword);
-                                if (!string.IsNullOrEmpty(tableName))
-                                {
-                                    references.Add(tableName);
-                                }
-
-                                nextIndex = afterKeyword;
-                            }
-                            else if (tokens[nextIndex].Type == OracleDdlLexer.LPAREN)
-                            {
-                                nextIndex = SkipParentheses(tokens, nextIndex);
-                            }
-                            else
-                            {
-                                nextIndex++;
-                            }
-                        }
-
-                        i = nextIndex;
-                        break;
-                    }
-            }
-        }
-
-        return references;
-    }
-
-    private static string? TryReadTableReference(IReadOnlyList<IToken> tokens, ref int index)
-    {
-        while (index < tokens.Count)
-        {
-            var token = tokens[index];
-            if (token.Type == OracleDdlLexer.LPAREN)
-            {
-                var nextIndex = index + 1;
-                if (nextIndex < tokens.Count && tokens[nextIndex].Type == OracleDdlLexer.SELECT)
-                {
-                    index = SkipParentheses(tokens, index);
-                    continue;
-                }
-
-                index++;
+                i = j;
                 continue;
             }
 
-            if (token.Type == OracleDdlLexer.ONLY)
-            {
-                index++;
-                continue;
-            }
-
-            if (IsIdentifier(token.Type))
-            {
-                return ReadQualifiedName(tokens, ref index);
-            }
-
-            if (token.Type == OracleDdlLexer.STRING || token.Type == OracleDdlLexer.NUMBER)
-            {
-                index++;
-                continue;
-            }
-
-            break;
+            i++;
         }
 
-        return null;
+        return g;
     }
 
-    private static string? ReadQualifiedName(IReadOnlyList<IToken> tokens, ref int index)
-    {
-        var parts = new List<string>();
-        while (index < tokens.Count)
-        {
-            var token = tokens[index];
-            if (IsIdentifier(token.Type))
-            {
-                parts.Add(NormalizeName(token.Text));
-                index++;
-                if (index < tokens.Count && tokens[index].Type == OracleDdlLexer.DOT)
-                {
-                    index++;
-                    continue;
-                }
+    // ---------- helpers ----------
 
+    private static bool IsKeyword(string t, string kw) => string.Equals(t, kw, StringComparison.OrdinalIgnoreCase);
+
+    private static bool Match(List<string> toks, ref int i, params string[] seq)
+    {
+        int k = i;
+        foreach (var s in seq)
+        {
+            if (k >= toks.Count || !IsKeyword(toks[k], s)) return false;
+            k++;
+        }
+        i = k;
+        return true;
+    }
+
+    private static string ReadObjectName(List<string> toks, ref int i)
+    {
+        // Считываем [SCHEMA '.'] NAME — до первого символа, означающего начало тела ( '(', 'IS', 'AS', 'AUTHID', 'EDITIONSABLE', ... )
+        var sb = new StringBuilder();
+        int k = i;
+
+        // имя может быть в кавычках, с dblink (@), с PARTITION/ORGANIZATION — все это отбрасываем до структурных ключевых слов
+        while (k < toks.Count)
+        {
+            var t = toks[k];
+            if (t is "(" or "IS" or "AS" or "AUTHID" or "EDITIONABLE" or "NONEDITIONABLE" or "ORGANIZATION" or "EXTERNAL" or "PARTITION" or "CLUSTER" or "OF" or "USING")
                 break;
-            }
 
-            break;
+            // имя/точка/@ — собираем
+            if (IsIdentPiece(t)) { if (sb.Length > 0) sb.Append(t == "." ? "." : (t == "@" ? "@" : ".")); sb.Append(NormalizeIdent(t)); }
+            else if (t == ".") { sb.Append("."); }
+            else if (t == "@") { sb.Append("@"); }   // dblink
+            else break;
+
+            k++;
         }
 
-        return parts.Count == 0 ? null : string.Join('.', parts);
+        i = k;
+        var s = sb.ToString().Trim('.');
+        // schema.table@dblink → оставим schema.table, dblink для анализа не нужен
+        var at = s.IndexOf('@');
+        return at >= 0 ? s[..at] : s;
     }
 
-    private static bool IsIdentifier(int tokenType)
-        => tokenType == OracleDdlLexer.IDENTIFIER || tokenType == OracleDdlLexer.QUOTED_IDENTIFIER;
-
-    private static string NormalizeName(string text)
+    private static bool IsIdentPiece(string t)
     {
-        if (string.IsNullOrEmpty(text))
-        {
-            return text;
-        }
+        if (t == "." || t == "@") return true;
+        if (t.StartsWith("\"") && t.EndsWith("\"")) return true;
+        // Oracle идентификатор — буквы/цифры/подчерк; оставим просто эвристику
+        return char.IsLetterOrDigit(t.FirstOrDefault()) || t == "_";
+    }
 
-        if (text.StartsWith('"') && text.EndsWith('"'))
+    private static string NormalizeIdent(string t)
+    {
+        if (t.StartsWith("\"") && t.EndsWith("\""))
+            return t[1..^1]; // убираем кавычки
+        return t;
+    }
+
+    private static void ExtractFkRefs(List<string> toks, int startIdx, DbObjectId obj, DepGraph g)
+    {
+        // Ищем шаблоны: FOREIGN KEY ... REFERENCES <name>
+        for (int k = startIdx; k < toks.Count; k++)
         {
-            var inner = text.Substring(1, text.Length - 2);
-            if (inner.IndexOf('"') >= 0)
+            if (IsKeyword(toks[k], "CREATE")) break; // следующий объект — выходим
+
+            if (IsKeyword(toks[k], "FOREIGN") && k + 1 < toks.Count && IsKeyword(toks[k + 1], "KEY"))
             {
-                var builder = new System.Text.StringBuilder(inner.Length);
-                for (var i = 0; i < inner.Length; i++)
+                // прыгнем к REFERENCES
+                int j = k + 2;
+                while (j < toks.Count && !(IsKeyword(toks[j], "REFERENCES"))) j++;
+                if (j < toks.Count && IsKeyword(toks[j], "REFERENCES"))
                 {
-                    if (inner[i] == '"' && i + 1 < inner.Length && inner[i + 1] == '"')
+                    j++;
+                    var refName = ReadObjectName(toks, ref j);
+                    if (!string.IsNullOrWhiteSpace(refName))
                     {
-                        builder.Append('"');
-                        i++;
-                    }
-                    else
-                    {
-                        builder.Append(inner[i]);
+                        g.Tables.Add(refName);
+                        g.Edges.Add(new DepEdge(obj, refName, DepKind.ForeignKey));
                     }
                 }
-
-                return builder.ToString();
             }
-
-            return inner;
         }
-
-        return text.ToUpperInvariant();
     }
 
-    private static int FindToken(IReadOnlyList<IToken> tokens, int tokenType, int startIndex)
+    private static void ExtractQueryTables(List<string> toks, int startIdx, DbObjectId obj, ref DepGraph g, DepKind kind)
     {
-        for (var i = Math.Max(0, startIndex); i < tokens.Count; i++)
+        // Ищем отрезок после AS | AS ( ... ) SELECT ... — упрощённая эвристика: FROM / JOIN <name>
+        // Работает и для VIEW, и для SELECT внутри PLSQL (если понадобится).
+        bool inSelect = false;
+        for (int k = startIdx; k < toks.Count; k++)
         {
-            if (tokens[i].Type == tokenType)
+            if (IsKeyword(toks[k], "CREATE")) break;
+
+            if (IsKeyword(toks[k], "AS")) { inSelect = true; continue; }
+            if (!inSelect && IsKeyword(toks[k], "SELECT")) inSelect = true;
+
+            if (inSelect && (IsKeyword(toks[k], "FROM") || IsKeyword(toks[k], "JOIN") || IsKeyword(toks[k], "UPDATE") || IsKeyword(toks[k], "INTO")))
             {
-                return i;
+                int j = k + 1;
+                var name = ReadObjectName(toks, ref j);
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    g.Tables.Add(name);
+                    g.Edges.Add(new DepEdge(obj, name, kind));
+                }
             }
         }
-
-        return -1;
     }
 
-    private static bool ContainsTokenType(IReadOnlyList<IToken> tokens, int tokenType)
-        => tokens.Any(token => token.Type == tokenType);
-
-    private static int SkipParentheses(IReadOnlyList<IToken> tokens, int index)
+    private static void ExtractDmlTables(List<string> toks, int startIdx, DbObjectId obj, DepGraph g)
     {
-        if (index >= tokens.Count || tokens[index].Type != OracleDdlLexer.LPAREN)
+        for (int k = startIdx; k < toks.Count; k++)
         {
-            return index;
-        }
+            if (IsKeyword(toks[k], "CREATE")) break;
 
-        var depth = 1;
-        index++;
-        while (index < tokens.Count && depth > 0)
-        {
-            if (tokens[index].Type == OracleDdlLexer.LPAREN)
+            if (IsKeyword(toks[k], "INSERT") && k + 1 < toks.Count && IsKeyword(toks[k + 1], "INTO"))
             {
-                depth++;
+                int j = k + 2;
+                var name = ReadObjectName(toks, ref j);
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    g.Tables.Add(name);
+                    g.Edges.Add(new DepEdge(obj, name, DepKind.DmlWrite));
+                }
             }
-            else if (tokens[index].Type == OracleDdlLexer.RPAREN)
+            else if (IsKeyword(toks[k], "UPDATE"))
             {
-                depth--;
+                int j = k + 1;
+                var name = ReadObjectName(toks, ref j);
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    g.Tables.Add(name);
+                    g.Edges.Add(new DepEdge(obj, name, DepKind.DmlWrite));
+                }
             }
-
-            index++;
+            else if (IsKeyword(toks[k], "DELETE") && k + 1 < toks.Count && IsKeyword(toks[k + 1], "FROM"))
+            {
+                int j = k + 2;
+                var name = ReadObjectName(toks, ref j);
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    g.Tables.Add(name);
+                    g.Edges.Add(new DepEdge(obj, name, DepKind.DmlWrite));
+                }
+            }
+            else if (IsKeyword(toks[k], "MERGE") && k + 1 < toks.Count && IsKeyword(toks[k + 1], "INTO"))
+            {
+                int j = k + 2;
+                var name = ReadObjectName(toks, ref j);
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    g.Tables.Add(name);
+                    g.Edges.Add(new DepEdge(obj, name, DepKind.DmlWrite));
+                }
+            }
+            else if (IsKeyword(toks[k], "SELECT"))
+            {
+                ExtractQueryTables(toks, k, obj, ref g, DepKind.DmlRead);
+            }
         }
-
-        return index;
     }
 }
