@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+
+		<!-- Генерировать Visitor (удобно для обхода дерева) -->
+		<Antlr4GenerateVisitor>true</Antlr4GenerateVisitor>
+		<Antlr4GenerateListener>false</Antlr4GenerateListener>
+		<!-- Генерация кода парсера на C# -->
+		<Antlr4Language>CSharp</Antlr4Language>
+	</PropertyGroup>
+	<ItemGroup>
+	  <Compile Remove="Grammar\**" />
+	  <EmbeddedResource Remove="Grammar\**" />
+	  <None Remove="Grammar\**" />
+	</ItemGroup>
+
+	<!--<ItemGroup>
+		<PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
+		<PackageReference Include="Antlr4BuildTasks" Version="12.11.0" />
+	</ItemGroup>-->
+</Project>
