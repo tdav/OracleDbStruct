@@ -1,15 +1,4 @@
-﻿namespace OracleDeps;
-
-public enum DbObjectKind { Table, View, Package, Procedure, Function, Trigger, Unknown }
-
-public sealed record DbObjectId(string Name, DbObjectKind Kind)
-{
-    public override string ToString() => $"{Kind}:{Name}";
-}
-
-public enum DepKind { ForeignKey, ViewQuery, DmlRead, DmlWrite }
-
-public sealed record DepEdge(DbObjectId From, string ToTable, DepKind Kind);
+﻿namespace OracleDepsSol.Models;
 
 public sealed class DepGraph
 {

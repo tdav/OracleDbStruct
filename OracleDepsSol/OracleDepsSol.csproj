@@ -12,6 +12,10 @@
 		<Antlr4Language>CSharp</Antlr4Language>
 	</PropertyGroup>
 	<ItemGroup>
+	  <PackageReference Include="Antlr4.CodeGenerator" Version="4.6.6">
+	    <PrivateAssets>all</PrivateAssets>
+	    <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	  </PackageReference>
 	  <PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
 	  <PackageReference Include="Antlr4BuildTasks" Version="12.11.0" />
 	</ItemGroup>
@@ -19,7 +23,6 @@
 	<ItemGroup>
 	  <Antlr4 Include="Grammar\*.g4">
 	    <Generator>MSBuild:Compile</Generator>
-	    <Package>OracleDeps</Package>
 	    <TargetLanguage>CSharp</TargetLanguage>
 	    <Listener>False</Listener>
 	    <Visitor>True</Visitor>

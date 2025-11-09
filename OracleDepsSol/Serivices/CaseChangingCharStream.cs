@@ -1,7 +1,7 @@
 ﻿using Antlr4.Runtime;
 using Antlr4.Runtime.Misc;
 
-namespace OracleDeps;
+namespace OracleDepsSol.Serivices;
 
 public sealed class CaseChangingCharStream : ICharStream
 {
