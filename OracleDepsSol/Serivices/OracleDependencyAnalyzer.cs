@@ -1,145 +1,37 @@
 ﻿using OracleDepsSol.Models;
 using System.Collections.Concurrent;
-using System.Text.RegularExpressions;
 
 namespace OracleDepsSol.Serivices;
 
 public static class OracleDependencyAnalyzer
 {
-    /// <summary>
-    /// Анализирует Oracle DDL синхронно
-    /// </summary>
-    public static DepGraph Analyze(string ddl)
-    {
-        return AnalyzeInternal(ddl, CancellationToken.None, useParallel: false);
-    }
-
-    /// <summary>
-    /// Анализирует Oracle DDL асинхронно без параллелизма
-    /// </summary>
-    public static async Task<DepGraph> AnalyzeAsync(string ddl)
-    {
-        return await AnalyzeAsync(ddl, CancellationToken.None);
-    }
-
-    /// <summary>
-    /// Анализирует Oracle DDL асинхронно с поддержкой отмены
-    /// </summary>
-    public static async Task<DepGraph> AnalyzeAsync(string ddl, CancellationToken cancellationToken)
-    {
-        return await Task.Run(() => AnalyzeInternal(ddl, cancellationToken, useParallel: false), cancellationToken);
-    }
-
-    /// <summary>
-    /// Анализирует Oracle DDL параллельно
-    /// </summary>
-    public static DepGraph AnalyzeParallel(string ddl)
-    {
-        return AnalyzeInternal(ddl, CancellationToken.None, useParallel: true);
-    }
-
-    /// <summary>
-    /// Анализирует Oracle DDL асинхронно с параллельной обработкой
-    /// </summary>
-    public static async Task<DepGraph> AnalyzeParallelAsync(string ddl)
-    {
-        return await AnalyzeParallelAsync(ddl, CancellationToken.None);
-    }
-
-    /// <summary>
-    /// Анализирует Oracle DDL асинхронно с параллельной обработкой и поддержкой отмены
-    /// </summary>
-    public static async Task<DepGraph> AnalyzeParallelAsync(string ddl, CancellationToken cancellationToken)
-    {
-        return await Task.Run(() => AnalyzeInternal(ddl, cancellationToken, useParallel: true), cancellationToken);
-    }
-
-    private static DepGraph AnalyzeInternal(string ddl, CancellationToken cancellationToken, bool useParallel)
+    public static DepGraph AnalyzeParallelAsync(string ddl)
     {
         var codeTokens = Tokenize(ddl);
 
-        // Находим все CREATE блоки параллельно или последовательно
-        var createBlocks = useParallel
-            ? FindCreateBlocksParallel(codeTokens, cancellationToken)
-            : FindCreateBlocksSequential(codeTokens, cancellationToken);
+        // Находим все CREATE блоки параллельно
+        var createBlocks = FindCreateBlocksParallel(codeTokens);
 
         var g = new DepGraph();
 
-        if (useParallel)
+        // Параллельная обработка CREATE блоков с потокобезопасностью
+        Parallel.ForEach(createBlocks, new ParallelOptions
         {
-            // Параллельная обработка CREATE блоков с потокобезопасностью
-            Parallel.ForEach(createBlocks, new ParallelOptions
-            {
-                CancellationToken = cancellationToken,
-                MaxDegreeOfParallelism = Environment.ProcessorCount
-            },
-            (block) =>
-            {
-                ProcessCreateBlock(codeTokens, block, g);
-            });
-        }
-        else
+            MaxDegreeOfParallelism = Environment.ProcessorCount
+        },
+        (block) =>
         {
-            // Последовательная обработка
-            foreach (var block in createBlocks)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                ProcessCreateBlock(codeTokens, block, g);
-            }
-        }
+            ProcessCreateBlock(codeTokens, block, g);
+        });
 
         return g;
     }
 
-    private static List<(int start, int end, DbObjectKind kind, string name)> FindCreateBlocksSequential(
-        List<string> codeTokens, CancellationToken cancellationToken)
-    {
-        var blocks = new List<(int, int, DbObjectKind, string)>();
-        var i = 0;
-
-        while (i < codeTokens.Count)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (IsKeyword(codeTokens[i], "CREATE"))
-            {
-                var j = i + 1;
-                if (Match(codeTokens, ref j, "OR", "REPLACE")) { /* optional */ }
-
-                DbObjectKind kind = DbObjectKind.Unknown;
-                if (Match(codeTokens, ref j, "TABLE")) kind = DbObjectKind.Table;
-                else if (Match(codeTokens, ref j, "VIEW")) kind = DbObjectKind.View;
-                else if (Match(codeTokens, ref j, "PACKAGE")) kind = DbObjectKind.Package;
-                else if (Match(codeTokens, ref j, "PROCEDURE")) kind = DbObjectKind.Procedure;
-                else if (Match(codeTokens, ref j, "FUNCTION")) kind = DbObjectKind.Function;
-                else if (Match(codeTokens, ref j, "TRIGGER")) kind = DbObjectKind.Trigger;
-
-                if (kind != DbObjectKind.Unknown)
-                {
-                    var nameStart = j;
-                    var name = ReadObjectName(codeTokens, ref j);
-
-                    if (!string.IsNullOrEmpty(name))
-                    {
-                        blocks.Add((i, j, kind, name));
-                    }
-                }
-
-                i = j;
-                continue;
-            }
-
-            i++;
-        }
-
-        return blocks;
-    }
-
     private static List<(int start, int end, DbObjectKind kind, string name)> FindCreateBlocksParallel(
-        List<string> codeTokens, CancellationToken cancellationToken)
+        List<string> codeTokens)
     {
         var blocks = new ConcurrentBag<(int, int, DbObjectKind, string)>();
-        
+
         // Разбиваем на батчи для параллельной обработки
         const int batchSize = 1000;
         var tokenCount = codeTokens.Count;
@@ -147,7 +39,6 @@ public static class OracleDependencyAnalyzer
 
         Parallel.For(0, batches, new ParallelOptions
         {
-            CancellationToken = cancellationToken,
             MaxDegreeOfParallelism = Environment.ProcessorCount
         },
         (batchIndex) =>
@@ -157,8 +48,6 @@ public static class OracleDependencyAnalyzer
 
             for (int i = start; i < end; i++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
                 if (IsKeyword(codeTokens[i], "CREATE"))
                 {
                     var j = i + 1;
@@ -208,6 +97,10 @@ public static class OracleDependencyAnalyzer
 
         if (kind == DbObjectKind.View)
         {
+            lock (g.Views)
+            {
+                g.Views.Add(name);
+            }
             ExtractQueryTablesThreadSafe(codeTokens, j, obj, g, DepKind.ViewQuery);
         }
 

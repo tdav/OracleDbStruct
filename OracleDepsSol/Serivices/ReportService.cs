@@ -15,9 +15,15 @@ public static class ReportService
     {
         // 1) Короткая сводка
         Console.WriteLine("== TABLES (discovered) ==");
-        foreach (var t in graph.Tables.OrderBy(_ => _))
-            Console.WriteLine($"  {t}");
+      //  foreach (var t in graph.Tables.OrderBy(_ => _))
+            Console.WriteLine($"  {graph.Tables.Count}");
+            //Console.WriteLine($"  {t}");
 
+        Console.WriteLine("\n== VIEWS (discovered) ==");
+       // foreach (var v in graph.Views.OrderBy(_ => _))
+            Console.WriteLine($"  {graph.Views.Count}");
+
+        /**
         Console.WriteLine("\n== FK Dependencies (TABLE -> TABLE) ==");
         foreach (var (fromTable, toTable) in graph.TableFkEdges().OrderBy(e => e.fromTable).ThenBy(e => e.toTable))
             Console.WriteLine($"  {fromTable} -> {toTable}");
@@ -26,6 +32,7 @@ public static class ReportService
         Console.WriteLine("\n== All object->table edges ==");
         foreach (var e in graph.Edges.OrderBy(e => e.From.Name))
             Console.WriteLine($"  {e.From} --[{e.Kind}]--> {e.ToTable}");
+        **/
     }
 
     /// <summary>
@@ -43,8 +50,10 @@ public static class ReportService
         else
         {
             Console.WriteLine("\n== UNUSED TABLES ==");
-            foreach (var t in unused.OrderBy(_ => _))
-                Console.WriteLine($"  {t}");
+            //foreach (var t in unused.OrderBy(_ => _))
+            //    Console.WriteLine($"  {t}");
+
+            Console.WriteLine($"  {unused.Count}");
         }
     }
 
@@ -61,8 +70,12 @@ public static class ReportService
         foreach (var t in graph.Tables)
             sb.AppendLine($"  \"TABLE:{t}\" [shape=box];");
 
-        // Объекты (view/plsql)
-        foreach (var o in graph.Objects.Where(o => o.Kind != DbObjectKind.Table))
+        // Узлы представлений
+        foreach (var v in graph.Views)
+            sb.AppendLine($"  \"VIEW:{v}\" [shape=box, style=dashed];");
+
+        // Объекты (packages/procedures/functions/triggers)
+        foreach (var o in graph.Objects.Where(o => o.Kind != DbObjectKind.Table && o.Kind != DbObjectKind.View))
             sb.AppendLine($"  \"{o}\" [shape=ellipse, style=dashed];");
 
         foreach (var e in graph.Edges)
@@ -80,6 +93,7 @@ public static class ReportService
         var json = System.Text.Json.JsonSerializer.Serialize(new
         {
             tables = graph.Tables.OrderBy(_ => _).ToArray(),
+            views = graph.Views.OrderBy(_ => _).ToArray(),
             edges = graph.Edges.Select(e => new
             {
                 from = e.From.ToString(),

@@ -14,12 +14,12 @@ internal class Program
             Console.WriteLine($"Анализ начал в: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
 
             // Используем параллельный асинхронный анализатор
-            var graph = await OracleDependencyAnalyzer.AnalyzeParallelAsync(ddl);
+            var graph =  OracleDependencyAnalyzer.AnalyzeParallelAsync(ddl);
 
             Console.WriteLine($"Анализ завершен в: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
 
             // Вывести основную сводку
-            // ReportService.PrintSummary(graph);
+            ReportService.PrintSummary(graph);
 
             // Вывести неиспользуемые таблицы
             ReportService.PrintUnusedTables(graph);
